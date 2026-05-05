@@ -26,7 +26,7 @@ from snowflake.sqlalchemy import URL
 from sqlalchemy.sql import text
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from singer_sdk.helpers import types
     from singer_sdk.helpers._batch import BaseBatchFileEncoding, BatchConfig
@@ -207,8 +207,16 @@ class SnowflakeConnector(SQLConnector):
         return engine
 
     # overridden to filter out the information_schema from catalog discovery
-    def discover_catalog_entries(self) -> list[dict]:
+    def discover_catalog_entries(
+        self,
+        exclude_schemas: Sequence[str] = (),
+        reflect_indices: bool = True,
+    ) -> list[dict]:
         """Return a list of catalog entries from discovery.
+
+        Args:
+            exclude_schemas: Schema names to skip (see SDK ``SQLConnector``).
+            reflect_indices: Whether to reflect indexes for primary-key detection.
 
         Returns:
             The discovered catalog entries as a list.
@@ -217,30 +225,55 @@ class SnowflakeConnector(SQLConnector):
         tables = [t.lower() for t in self.config.get("tables", [])]
         engine = self.create_engine()
         inspected = sqlalchemy.inspect(engine)
-        schema_names = [
-            self._dialect.identifier_preparer.quote(schema_name)
-            for schema_name in self.get_schema_names(engine, inspected)
-            if schema_name.lower() != "information_schema"
+        schema_names_raw = [
+            name
+            for name in self.get_schema_names(engine, inspected)
+            if name.lower() != "information_schema" and name not in exclude_schemas
         ]
         not_tables = not tables
-        table_schemas = {} if not_tables else {x.split(".")[0] for x in tables}
-        table_schema_names = [
-            x for x in schema_names if x in table_schemas
-        ] or schema_names
-        for schema_name in table_schema_names:
-            # Iterate through each table and view of relevant schemas
+        table_schemas = (
+            set() if not_tables else {x.split(".")[0].lower() for x in tables}
+        )
+        schemas_to_scan = [
+            s for s in schema_names_raw if not_tables or s.lower() in table_schemas
+        ] or schema_names_raw
+
+        for schema_name_raw in schemas_to_scan:
+            schema_name_quoted = self._dialect.identifier_preparer.quote(
+                schema_name_raw,
+            )
+            primary_keys = inspected.get_multi_pk_constraint(schema=schema_name_raw)
+            indices = (
+                inspected.get_multi_indexes(schema=schema_name_raw)
+                if reflect_indices
+                else {}
+            )
+
             for table_name, is_view in self.get_object_names(
                 engine,
                 inspected,
-                schema_name,
+                schema_name_quoted,
             ):
-                if not_tables or (f"{schema_name}.{table_name}" in tables):
+                qualified = f"{schema_name_raw}.{table_name}".lower()
+                if not_tables or qualified in tables:
+                    reflected_columns = inspected.get_columns(
+                        table_name,
+                        schema=schema_name_raw,
+                    )
                     catalog_entry = self.discover_catalog_entry(
                         engine,
                         inspected,
-                        schema_name,
+                        schema_name_raw,
                         table_name,
                         is_view,
+                        reflected_columns=reflected_columns,
+                        reflected_pk=primary_keys.get(
+                            (schema_name_raw, table_name),
+                        ),
+                        reflected_indices=indices.get(
+                            (schema_name_raw, table_name),
+                            [],
+                        ),
                     )
                     result.append(catalog_entry.to_dict())
 

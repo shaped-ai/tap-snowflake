@@ -28,6 +28,16 @@ plugins:
     - name: warehouse
     - name: database
     - name: schema
+    - name: tables
+      kind: array
+    - name: metadata
+      kind: object
+    - name: select
+      kind: array
+    - name: flattening_enabled
+      kind: boolean
+    - name: flattening_max_depth
+      kind: integer
   loaders:
   - name: target-jsonl
     variant: andyh1203
